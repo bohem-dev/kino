@@ -1,0 +1,4 @@
+{
+  "description": "All curated metadata, excluding free-text plot",
+  "groups": ["taxonomy", "production", "collection", "crew", "cast", "language", "year"]
+}

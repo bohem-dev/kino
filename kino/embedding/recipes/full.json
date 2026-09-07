@@ -1,0 +1,4 @@
+{
+  "description": "Every available field group (adds financial, external, flags, reviews on top of R10)",
+  "groups": "all"
+}

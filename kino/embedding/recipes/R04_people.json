@@ -1,0 +1,4 @@
+{
+  "description": "Cast and crew network identity",
+  "groups": ["crew", "cast"]
+}

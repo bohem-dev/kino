@@ -1,0 +1,4 @@
+{
+  "description": "Practical maximal semantic movie record",
+  "groups": ["title", "year", "language", "taxonomy", "production", "collection", "crew", "cast", "text"]
+}
