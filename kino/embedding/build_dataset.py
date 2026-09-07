@@ -42,6 +42,40 @@ def _run_embedder(embedder, csv_path, run_dir, harrier_model, device,
     raise ValueError(f"Unknown embedder: {embedder}")
 
 
+def _load_manifest(run_dir):
+    manifest_path = run_dir / "manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        # Truncated/corrupt from a run that died mid-write -- treat as absent.
+        return None
+
+
+def _completed_embedder_runs(manifest, embedders, run_dir):
+    # Returns {embedder: (vectors_path, ids_path)} for embedders whose
+    # manifest entry AND on-disk files both check out. A dead process can
+    # leave a manifest entry pointing at files that were never finished
+    # writing, or a subset.csv that's gone missing -- re-verify existence
+    # rather than trusting the manifest blindly.
+    if manifest is None:
+        return {}
+    csv_path = Path(manifest.get("csv_path", ""))
+    if not csv_path.exists():
+        return {}
+    done = {}
+    for embedder in embedders:
+        entry = manifest.get("embedders", {}).get(embedder)
+        if not entry:
+            continue
+        vectors_path = Path(entry["vectors_path"])
+        ids_path = Path(entry["movie_ids_path"])
+        if vectors_path.exists() and ids_path.exists():
+            done[embedder] = (vectors_path, ids_path)
+    return done
+
+
 def run_recipe(
     recipe_key,
     top_n,
@@ -59,6 +93,7 @@ def run_recipe(
     w2v_window,
     w2v_min_count,
     w2v_epochs,
+    resume=False,
 ):
     # runs subset + every requested embedder for one recipe, returns a
     # list of run descriptors (one per embedder) for visualize.main_combined()
@@ -67,6 +102,26 @@ def run_recipe(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'=' * 72}\nRecipe: {recipe_key}  ({recipe['description']})\ngroups={recipe['groups']}\nrun_dir={run_dir}\n{'=' * 72}")
+
+    existing_manifest = _load_manifest(run_dir) if resume else None
+    done = _completed_embedder_runs(existing_manifest, embedders, run_dir) if resume else {}
+    pending = [e for e in embedders if e not in done]
+
+    if resume and done:
+        print(f"--resume: already have {', '.join(done)} for {recipe_key} -- reusing.")
+
+    if not pending:
+        print(f"--resume: {recipe_key} fully done ({', '.join(embedders)}) -- skipping subset+embed.")
+        csv_path = Path(existing_manifest["csv_path"])
+        runs = []
+        for embedder, (vectors_path, ids_path) in done.items():
+            runs.append({
+                "label": f"{recipe_key} / {embedder}",
+                "csv_path": csv_path,
+                "vectors_path": vectors_path,
+                "movie_ids_path": ids_path,
+            })
+        return runs
 
     subset.main(
         input_dir=input_dir,
@@ -88,7 +143,10 @@ def run_recipe(
         "top_n": top_n,
         "csv_path": str(csv_path),
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "embedders": {},
+        "embedders": {
+            embedder: {"vectors_path": str(v), "movie_ids_path": str(i)}
+            for embedder, (v, i) in done.items()
+        },
     }
 
     embedder_kwargs = dict(
@@ -97,18 +155,25 @@ def run_recipe(
         w2v_min_count=w2v_min_count, w2v_epochs=w2v_epochs,
     )
 
-    if len(embedders) > 1:
+    if len(pending) > 1:
         # harrier (GPU-bound) and word2vec (CPU-bound) don't contend for the
         # same resource -- safe to run concurrently, unlike the process
         # pools inside subset.py/visualize.py which already claim every core.
-        print(f"Running {', '.join(embedders)} concurrently...")
-        with ThreadPoolExecutor(max_workers=len(embedders)) as pool:
-            futures = {embedder: pool.submit(_run_embedder, embedder, **embedder_kwargs) for embedder in embedders}
+        print(f"Running {', '.join(pending)} concurrently...")
+        with ThreadPoolExecutor(max_workers=len(pending)) as pool:
+            futures = {embedder: pool.submit(_run_embedder, embedder, **embedder_kwargs) for embedder in pending}
             results = {embedder: future.result() for embedder, future in futures.items()}
     else:
-        results = {embedders[0]: _run_embedder(embedders[0], **embedder_kwargs)}
+        results = {pending[0]: _run_embedder(pending[0], **embedder_kwargs)}
 
     runs = []
+    for embedder, (vectors_path, ids_path) in done.items():
+        runs.append({
+            "label": f"{recipe_key} / {embedder}",
+            "csv_path": csv_path,
+            "vectors_path": vectors_path,
+            "movie_ids_path": ids_path,
+        })
     for embedder, (vectors_path, ids_path) in results.items():
         manifest["embedders"][embedder] = {
             "vectors_path": str(vectors_path),
@@ -121,6 +186,10 @@ def run_recipe(
             "movie_ids_path": ids_path,
         })
 
+    # Write the manifest right after this recipe's embedders finish (rather
+    # than only at the very end of the whole invocation) so a shutdown
+    # between recipes loses nothing already completed -- that's the
+    # checkpoint --resume reads back.
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(f"Manifest -> {run_dir / 'manifest.json'}")
     return runs
@@ -156,6 +225,10 @@ def main():
     parser.add_argument("--w2v-epochs", type=int, default=word2vec.EPOCHS)
 
     parser.add_argument("--list-recipes", action="store_true", help="Print available recipes and exit")
+    parser.add_argument("--resume", action="store_true",
+                         help="Skip recipe/embedder combinations already completed in a prior interrupted "
+                              "invocation (checked via each run's manifest.json + the files it points at), "
+                              "and reuse cached PCA/UMAP/t-SNE fits when rebuilding the explorer")
     args = parser.parse_args()
 
     if args.list_recipes:
@@ -187,6 +260,7 @@ def main():
         w2v_window=args.w2v_window,
         w2v_min_count=args.w2v_min_count,
         w2v_epochs=args.w2v_epochs,
+        resume=args.resume,
     )
 
     all_runs = []
@@ -198,7 +272,8 @@ def main():
     if not args.skip_visualize:
         explorer_path = runs_dir / str(args.top_n) / "explorer.html"
         print(f"\nBuilding combined explorer covering all {len(all_runs)} run(s)...")
-        visualize.main_combined(all_runs, explorer_path, sample=args.sample, max_workers=args.viz_workers)
+        visualize.main_combined(all_runs, explorer_path, sample=args.sample, max_workers=args.viz_workers,
+                                 resume=args.resume)
     else:
         print("(--skip-visualize: no explorer built)")
 

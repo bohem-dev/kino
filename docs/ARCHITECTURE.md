@@ -208,6 +208,7 @@ own directory so recipes never clobber each other's output:
 python kino/embedding/build_dataset.py --top-n 10000 --recipe R01_plot
 python kino/embedding/build_dataset.py --top-n 10000 --recipe full          # every field group
 python kino/embedding/build_dataset.py --top-n 10000 --recipe all --embedder both  # every recipe
+python kino/embedding/build_dataset.py --top-n 10000 --recipe all --embedder both --resume  # continue after a shutdown
 python kino/embedding/build_dataset.py --list-recipes
 
 out/embedding_analysis/
@@ -225,6 +226,22 @@ out/embedding_analysis/
                                           each figure's own PCA/UMAP/t-SNE dropdown, so comparing
                                           runs never means opening a second browser tab
 ```
+
+**Checkpointing / `--resume`.** `build_dataset.py --recipe all --embedder both` can run for hours
+(t-SNE especially), so every stage checkpoints to disk as it finishes rather than only at the very
+end, and `--resume` picks back up from whatever's already there:
+- Per recipe/embedder: `run_dir/manifest.json` is written as soon as that recipe's requested
+  embedders finish, recording where their vectors landed. `--resume` re-verifies those files still
+  exist on disk (not just the manifest entry — a killed process can leave a stale pointer) and
+  skips straight to the next recipe/embedder combo that's actually missing; a recipe with only
+  `word2vec` done and `harrier` still pending reruns just `harrier`, not the whole recipe.
+- Inside the explorer build (`visualize.main_combined`, the slow part — 26 PCA/UMAP/t-SNE fits per
+  run): each run's fitted 2D/3D coordinates are cached to
+  `vectors/<embedder>/<vectors_stem>_projections_cache_<sample|full>.npz` right after that run's
+  fits complete. `--resume` loads a run's cache instead of refitting it, so a shutdown mid-explorer
+  only costs the one run that was in flight, not everything already fitted.
+- Without `--resume`, behavior is unchanged — recipes/embedders/fits are always recomputed, and any
+  existing manifest or cache files for that run are simply overwritten.
 
 Add a new experiment by dropping a new `{"description": ..., "groups": [...]}` JSON file into
 `kino/embedding/recipes/` — no code changes needed. `"groups"` is a subset of

@@ -328,7 +328,43 @@ def load_run(csv_path, vectors_path, movie_ids_path, sample=None):
     return movies, embeddings
 
 
-def build_run_figures(csv_path, vectors_path, movie_ids_path, title_prefix, sample=None, max_workers=None):
+def _projections_cache_path(vectors_path, sample):
+    vectors_path = Path(vectors_path)
+    suffix = f"sample{sample}" if sample else "full"
+    return vectors_path.parent / f"{vectors_path.stem}_projections_cache_{suffix}.npz"
+
+
+def _load_cached_views(cache_path):
+    if not cache_path.exists():
+        return None
+    try:
+        npz = np.load(cache_path)
+        coords_by_dims = {2: {}, 3: {}}
+        for name in npz.files:
+            dims_str, key = name.split("__", 1)
+            coords_by_dims[int(dims_str)][key] = npz[name]
+        return coords_by_dims
+    except (OSError, ValueError, EOFError):
+        # Partial/corrupt file from a run that died mid-write -- recompute.
+        return None
+
+
+def _save_cached_views(cache_path, coords_by_dims):
+    arrays = {
+        f"{dims}__{key}": coords
+        for dims, coords_by_key in coords_by_dims.items()
+        for key, coords in coords_by_key.items()
+    }
+    # Write under a temp name then rename -- np.savez isn't atomic on its
+    # own, and a kill mid-write would otherwise leave a corrupt cache file
+    # that _load_cached_views has to detect and discard instead of reusing.
+    tmp_path = cache_path.with_suffix(".npz.tmp")
+    np.savez(tmp_path, **arrays)
+    tmp_path.rename(cache_path)
+
+
+def build_run_figures(csv_path, vectors_path, movie_ids_path, title_prefix, sample=None, max_workers=None,
+                       resume=False):
     # loads one run's data, computes every layout, returns its 2D/3D
     # figures plus a long-format coordinate dataframe
     movies, embeddings = load_run(csv_path, vectors_path, movie_ids_path, sample=sample)
@@ -336,7 +372,13 @@ def build_run_figures(csv_path, vectors_path, movie_ids_path, title_prefix, samp
           f"Distinct primary genres: {movies['primary_genre'].nunique()}")
 
     view_defs = build_view_defs()
-    coords_by_dims = compute_all_views(embeddings, view_defs, max_workers=max_workers)
+    cache_path = _projections_cache_path(vectors_path, sample)
+    coords_by_dims = _load_cached_views(cache_path) if resume else None
+    if coords_by_dims is not None:
+        print(f"  --resume: loaded cached projections from {cache_path}")
+    else:
+        coords_by_dims = compute_all_views(embeddings, view_defs, max_workers=max_workers)
+        _save_cached_views(cache_path, coords_by_dims)
 
     fig_2d = build_dropdown_figure(movies, coords_by_dims[2], view_defs, dims=2, title_prefix=title_prefix)
     fig_3d = build_dropdown_figure(movies, coords_by_dims[3], view_defs, dims=3, title_prefix=title_prefix)
@@ -492,7 +534,7 @@ def resolve_run_paths(run_dir, embedder):
 # ---------------------------------------------------------------------
 
 def main(csv_path=DATA_CSV, vectors_path=VECTORS_PATH, movie_ids_path=MOVIE_IDS_PATH,
-         out_dir=OUT_DIR, tag=None, sample=None, max_workers=None):
+         out_dir=OUT_DIR, tag=None, sample=None, max_workers=None, resume=False):
     # single-run mode: one HTML with a Dimensions selector
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -501,7 +543,7 @@ def main(csv_path=DATA_CSV, vectors_path=VECTORS_PATH, movie_ids_path=MOVIE_IDS_
     print("Loading movies and embeddings...")
     fig_2d, fig_3d, coordinates = build_run_figures(
         csv_path, vectors_path, movie_ids_path,
-        title_prefix="Operation Kino", sample=sample, max_workers=max_workers,
+        title_prefix="Operation Kino", sample=sample, max_workers=max_workers, resume=resume,
     )
 
     html_path = out_dir / f"{tag}_projection_explorer.html"
@@ -516,13 +558,15 @@ def main(csv_path=DATA_CSV, vectors_path=VECTORS_PATH, movie_ids_path=MOVIE_IDS_
     return html_path
 
 
-def main_combined(runs, out_path, sample=None, max_workers=None):
+def main_combined(runs, out_path, sample=None, max_workers=None, resume=False):
     # multi-run mode: one HTML with Run + Dimensions selectors.
     # runs = [{"label": ..., "csv_path": ..., "vectors_path": ..., "movie_ids_path": ...}, ...]
     # computed one run at a time -- each run's own 26-fit computation
     # already saturates the machine via compute_all_views's process pool,
     # so running multiple runs' pools concurrently would oversubscribe
-    # instead of speeding anything up
+    # instead of speeding anything up. With --resume, each run's fitted
+    # projections are cached to disk (see _save_cached_views) so a
+    # shutdown partway through this loop only costs the in-progress run.
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -532,7 +576,7 @@ def main_combined(runs, out_path, sample=None, max_workers=None):
         print(f"\n[{i}/{len(runs)}] {run['label']}")
         fig_2d, fig_3d, coordinates = build_run_figures(
             run["csv_path"], run["vectors_path"], run["movie_ids_path"],
-            title_prefix=run["label"], sample=sample, max_workers=max_workers,
+            title_prefix=run["label"], sample=sample, max_workers=max_workers, resume=resume,
         )
         figures.append({"label": run["label"], "fig_2d": fig_2d, "fig_3d": fig_3d})
         coordinates["run"] = run["label"]
@@ -571,6 +615,9 @@ if __name__ == "__main__":
                          help="Subsample to N movies for a faster preview run (e.g. while iterating)")
     parser.add_argument("--workers", type=int, default=None,
                          help="Worker processes for the PCA/UMAP/t-SNE pool (default: every core)")
+    parser.add_argument("--resume", action="store_true",
+                         help="Reuse cached per-run PCA/UMAP/t-SNE fits from a prior interrupted run "
+                              "instead of recomputing them")
     args = parser.parse_args()
 
     if args.run_dirs:
@@ -585,7 +632,7 @@ if __name__ == "__main__":
                 "movie_ids_path": movie_ids_path,
             })
         combined_out = Path(args.combined_out) if args.combined_out else run_dirs[0].parent / "explorer.html"
-        main_combined(runs, combined_out, sample=args.sample, max_workers=args.workers)
+        main_combined(runs, combined_out, sample=args.sample, max_workers=args.workers, resume=args.resume)
     else:
         if args.run_dir:
             run_dir = Path(args.run_dir)
@@ -607,4 +654,5 @@ if __name__ == "__main__":
             tag=tag,
             sample=args.sample,
             max_workers=args.workers,
+            resume=args.resume,
         )
