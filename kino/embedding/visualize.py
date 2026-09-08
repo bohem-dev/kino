@@ -359,7 +359,11 @@ def _save_cached_views(cache_path, coords_by_dims):
     # own, and a kill mid-write would otherwise leave a corrupt cache file
     # that _load_cached_views has to detect and discard instead of reusing.
     tmp_path = cache_path.with_suffix(".npz.tmp")
-    np.savez(tmp_path, **arrays)
+    # Pass an open file handle rather than tmp_path directly -- np.savez
+    # auto-appends ".npz" to string paths that don't already end in ".npz",
+    # which would silently write to "*.npz.tmp.npz" instead of tmp_path.
+    with open(tmp_path, "wb") as f:
+        np.savez(f, **arrays)
     tmp_path.rename(cache_path)
 
 
