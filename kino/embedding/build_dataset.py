@@ -213,11 +213,13 @@ def main():
     parser.add_argument("--skip-visualize", action="store_true", help="Only run subset + embed")
     parser.add_argument("--sample", type=int, default=None, help="Passed through to visualize.py --sample")
     parser.add_argument("--viz-workers", type=int, default=None,
-                         help="Worker processes for the PCA/UMAP/t-SNE pool (default: every core)")
+                         help="Worker processes for the UMAP pool (default: every core)")
 
     parser.add_argument("--harrier-model", default=harrier.MODEL_NAME)
     parser.add_argument("--device", default=harrier.DEVICE)
-    parser.add_argument("--batch-size", type=int, default=harrier.BATCH_SIZE)
+    parser.add_argument("--batch-size", type=harrier.parse_batch_size, default=harrier.BATCH_SIZE,
+                         help="Fixed batch size, or 'auto' to grow/shrink around OOMs "
+                              "and fit as much as the device can handle")
 
     parser.add_argument("--w2v-vector-size", type=int, default=word2vec.VECTOR_SIZE)
     parser.add_argument("--w2v-window", type=int, default=word2vec.WINDOW)

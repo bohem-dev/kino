@@ -20,9 +20,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import umap.umap_ as umap
 
-from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
-
 
 # ---------------------------------------------------------------------
 # Defaults (all overridable via CLI -- see bottom of file)
@@ -44,8 +41,6 @@ PLOTLY_COLOUR_SEQUENCE = [
     "#1B9E77", "#D95F02", "#7570B3", "#E7298A", "#66A61E",
     "#E6AB02", "#A6761D", "#666666", "#8DD3C7", "#FFFFB3",
 ]
-
-TSNE_PERPLEXITIES = [5, 10, 20, 30, 50, 75]
 
 # Each named preset is one UMAP layout.
 # n_neighbors: low = tiny local neighbourhoods, high = more global structure.
@@ -114,15 +109,13 @@ def build_hover_text(rows):
 # ---------------------------------------------------------------------
 
 def build_view_defs():
-    defs = [{"key": "pca", "label": "PCA"}]
+    defs = []
     for name, params in UMAP_PRESETS.items():
         key = f"umap_{slugify(name)}"
         defs.append({
             "key": key,
             "label": f"UMAP: {name} (nn={params['n_neighbors']}, md={params['min_dist']})",
         })
-    for perplexity in TSNE_PERPLEXITIES:
-        defs.append({"key": f"tsne_{perplexity}", "label": f"t-SNE perplexity={perplexity}"})
     return defs
 
 
@@ -132,15 +125,9 @@ def _build_jobs(view_defs):
     jobs = []
     for dims in (2, 3):
         for view in view_defs:
-            if view["key"] == "pca":
-                jobs.append((dims, "pca", "pca", {}))
-            elif view["key"].startswith("umap_"):
-                name = view["key"][len("umap_"):]
-                params = next(p for n, p in UMAP_PRESETS.items() if slugify(n) == name)
-                jobs.append((dims, view["key"], "umap", params))
-            else:  # tsne_<perplexity>
-                perplexity = int(view["key"].split("_")[1])
-                jobs.append((dims, view["key"], "tsne", {"perplexity": perplexity}))
+            name = view["key"][len("umap_"):]
+            params = next(p for n, p in UMAP_PRESETS.items() if slugify(n) == name)
+            jobs.append((dims, view["key"], "umap", params))
     return jobs
 
 
@@ -158,36 +145,17 @@ def _init_worker(embeddings):
 def _fit_view(job):
     dims, key, method, params = job
     X = _WORKER_EMBEDDINGS
-    variance = None
 
-    if method == "pca":
-        model = PCA(n_components=dims, random_state=RANDOM_STATE)
-        coords = model.fit_transform(X)
-        variance = model.explained_variance_ratio_.sum()
-    elif method == "umap":
-        reducer = umap.UMAP(
-            n_components=dims,
-            n_neighbors=params["n_neighbors"],
-            min_dist=params["min_dist"],
-            metric="cosine",
-            random_state=RANDOM_STATE,
-        )
-        coords = reducer.fit_transform(X)
-    elif method == "tsne":
-        tsne = TSNE(
-            n_components=dims,
-            perplexity=params["perplexity"],
-            learning_rate="auto",
-            init="pca",
-            metric="cosine",
-            max_iter=1500,
-            random_state=RANDOM_STATE,
-        )
-        coords = tsne.fit_transform(X)
-    else:
-        raise ValueError(f"Unknown method: {method}")
+    reducer = umap.UMAP(
+        n_components=dims,
+        n_neighbors=params["n_neighbors"],
+        min_dist=params["min_dist"],
+        metric="cosine",
+        random_state=RANDOM_STATE,
+    )
+    coords = reducer.fit_transform(X)
 
-    return dims, key, coords, variance
+    return dims, key, coords
 
 
 def compute_all_views(embeddings, view_defs, max_workers=None):
@@ -205,13 +173,10 @@ def compute_all_views(embeddings, view_defs, max_workers=None):
         futures = {pool.submit(_fit_view, job): job for job in jobs}
         done = 0
         for future in as_completed(futures):
-            dims, key, coords, variance = future.result()
+            dims, key, coords = future.result()
             coords_by_dims[dims][key] = coords
             done += 1
-            if variance is not None:
-                print(f"    [{done}/{len(jobs)}] PCA {dims}D explained variance: {variance:.2%}")
-            else:
-                print(f"    [{done}/{len(jobs)}] {dims}D {key} done")
+            print(f"    [{done}/{len(jobs)}] {dims}D {key} done")
 
     return coords_by_dims
 
@@ -599,7 +564,7 @@ def main_combined(runs, out_path, sample=None, max_workers=None, resume=False):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="PCA/UMAP/t-SNE projection explorer, single or multi-run")
+    parser = argparse.ArgumentParser(description="UMAP projection explorer, single or multi-run")
     parser.add_argument("--run-dir", default=None,
                          help="A build_dataset.py run directory (out/embedding_analysis/runs/<top_n>/<recipe>) "
                               "-- resolves --csv/--vectors/--movie-ids/--out-dir/--tag automatically.")
@@ -618,9 +583,9 @@ if __name__ == "__main__":
     parser.add_argument("--sample", type=int, default=None,
                          help="Subsample to N movies for a faster preview run (e.g. while iterating)")
     parser.add_argument("--workers", type=int, default=None,
-                         help="Worker processes for the PCA/UMAP/t-SNE pool (default: every core)")
+                         help="Worker processes for the UMAP pool (default: every core)")
     parser.add_argument("--resume", action="store_true",
-                         help="Reuse cached per-run PCA/UMAP/t-SNE fits from a prior interrupted run "
+                         help="Reuse cached per-run UMAP fits from a prior interrupted run "
                               "instead of recomputing them")
     args = parser.parse_args()
 
