@@ -8,3 +8,5 @@ __pycache__/
 # all generated data/output -- reproducible via the pipeline, not source
 out/
 downloads/
+
+.serena/
